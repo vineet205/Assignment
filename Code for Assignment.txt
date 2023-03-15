@@ -1,0 +1,403 @@
+Final Project Report - Practical Machine Learning Course
+
+Data
+The training data for this project are available here: pml-training.csv
+
+The test data are available here: pml-testing.csv
+
+The data for this project come from this source
+
+Projct Purpose
+The goal of your project is to predict the manner in which they did the exercise. This is the “classe” variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+Preproccessing the training and testing dataset
+Loading the library
+library(plyr);
+library(dplyr)
+## 
+## Attaching package: 'dplyr'
+## The following objects are masked from 'package:plyr':
+## 
+##     arrange, count, desc, failwith, id, mutate, rename, summarise,
+##     summarize
+## The following objects are masked from 'package:stats':
+## 
+##     filter, lag
+## The following objects are masked from 'package:base':
+## 
+##     intersect, setdiff, setequal, union
+library(lattice)
+library(ggplot2)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+## Warning: Failed to load RGtk2 dynamic library, attempting to install it.
+## Please install GTK+ from http://r.research.att.com/libs/GTK_2.24.17-X11.pkg
+## If the package still does not load, please ensure that GTK+ is installed and that it is on your PATH environment variable
+## IN ANY CASE, RESTART R BEFORE TRYING TO LOAD THE PACKAGE AGAIN
+## Rattle: A free graphical interface for data mining with R.
+## Version 4.1.0 Copyright (c) 2006-2015 Togaware Pty Ltd.
+## Type 'rattle()' to shake, rattle, and roll your data.
+library(kernlab); 
+## 
+## Attaching package: 'kernlab'
+## The following object is masked from 'package:ggplot2':
+## 
+##     alpha
+library(randomForest)
+## randomForest 4.6-12
+## Type rfNews() to see new features/changes/bug fixes.
+## 
+## Attaching package: 'randomForest'
+## The following object is masked from 'package:ggplot2':
+## 
+##     margin
+## The following object is masked from 'package:dplyr':
+## 
+##     combine
+library(knitr)
+library(e1071)
+Loading the training data
+trainingdf <- read.csv("pml-training.csv")
+testingdf <- read.csv("pml-testing.csv")
+Let’s first analysis the rows and columns in training and testing set
+dim(trainingdf)
+## [1] 19622   160
+dim(testingdf)
+## [1]  20 160
+Check the records for each group
+groupByClasse <- trainingdf %>% group_by(classe) %>% summarise(counts = n())
+g <- ggplot(groupByClasse, aes(x = classe, y = counts)) + geom_bar(stat = "identity")
+g <- g + geom_bar(stat = "identity")
+g <- g + ggtitle("Total number of records for each groups")
+g <- g + xlab("Groups")
+g <- g + ylab("Counts")
+plot(g)
+
+
+rm(groupByClasse)
+Data set is skewed towards the group A, but it does not impact too much on the modeling
+After analysis the columns names we should Exclude the obvious columns i.e “X”, “user_name”, “raw_timestamp_part_1”, “raw_timestamp_part_2”, “cvtd_timestamp”
+excludecolumns <- c("X", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", 
+                    "cvtd_timestamp", "new_window")
+
+# Method to exlude some columns
+getDataExcludingSomeColumns  <- function(tdata, excludecolumns) {
+  exdata <- tdata[, !(names(tdata) %in% excludecolumns)]
+  exdata
+}
+
+# Now remove the columns
+trainingdf <- getDataExcludingSomeColumns(trainingdf, excludecolumns)
+testingdf <- getDataExcludingSomeColumns(testingdf, c(excludecolumns, 'problem_id'))
+
+dim(trainingdf)
+## [1] 19622   154
+dim(testingdf)
+## [1]  20 153
+Now after excluding after some obvious columns we have left with 154, one extra column because trainingdf contains classe and testingdf does not.
+
+Important observations:
+After deeply seeing the datasets we have found that it contains some measued statistics which will be same for all rows, e.g mean of a roll_belt will be same in all rows, so let’s exclude all the measured statics.
+# Removing the Measured statistic columns
+measuredStaticstucColPattern  <- "kurtosis_|skewness_|max_|min_|amplitude_|avg_|stddev_|var_"
+# Removed the measured Statics columns since they are same for one column for example max of yaw_belt will be same in all the rows
+getDataExceludedMatchingColumnPattern <- function (tdata, excludecolumnsPattern) {
+  exdata <- tdata[, -grep(excludecolumnsPattern, colnames(tdata))]
+  exdata
+}
+trainingdf <- getDataExceludedMatchingColumnPattern(trainingdf, measuredStaticstucColPattern)
+testingdf <- getDataExceludedMatchingColumnPattern(testingdf, measuredStaticstucColPattern)
+dim(trainingdf)
+## [1] 19622    54
+dim(testingdf)
+## [1] 20 53
+Removed the columns which has mostly NA values
+Now let’s make sure that any columns should not have NA more than 50% of total observaation
+# Now removing the columns which has more than 50% NA  values
+removedNAsColumns <- function(df) {
+  numRows <- nrow(df)
+  missingDf <- is.na(df)
+  removedColumns = which(colSums(missingDf) > numRows*50/100)
+  # might be possible that non of the columns have NA's more than 50%
+  if (length(removedColumns) > 0) {
+    colNames <- names(removedColumns)
+    df <- df[, -colNames]
+  }
+  df
+}
+
+trainingdf <- removedNAsColumns(trainingdf)
+testingdf <- removedNAsColumns(testingdf)
+
+dim(trainingdf)
+## [1] 19622    54
+dim(testingdf)
+## [1] 20 53
+Also using the following code block, we can check that is there any row left with NA’s values or not
+
+completeCase <- complete.cases(trainingdf)
+nrows <- nrow(trainingdf)
+sum(completeCase) == nrows
+## [1] TRUE
+From the above code block sum(completeCase) == nrows confirm that the number of complete case is equal to number of rows in trainingdf same for testingdf
+
+Now we have only 54 columns(features) are left. we can preproccess the training and testing i.e converting into scales of 0 to 1 and replacing any NA values to average of that columns
+PreProcess of data
+First removed the near Zero Var columns
+## integer(0)
+Normalize the data
+processedData <- function(rawdata) {
+  # for each columns NA should be replaced with average of that columns
+  for(column in names(rawdata)) {               
+    if(column == "classe") {
+      next;
+    }
+    columnValue <- as.numeric(rawdata[, column]);
+    avgColumnValue <- mean(columnValue, na.rm=TRUE)
+    minColumnValue <- min(columnValue, na.rm=TRUE)
+    maxColumnValue <- max(columnValue, na.rm=TRUE)
+    columnValue[is.na(columnValue)] <- avgColumnValue
+    
+    if (maxColumnValue == minColumnValue) {
+      next;
+    }
+    
+    for(i in 1:length(columnValue)) {
+      columnValue[i] <- round((columnValue[i] - minColumnValue) / (maxColumnValue - minColumnValue), 4);
+    }
+    
+    rawdata[, column] <- columnValue
+  }
+  rawdata
+}
+## Get the processed training data frame
+trainingdf <- processedData(trainingdf)
+testingdf <- processedData(testingdf)
+dim(trainingdf)
+## [1] 19622    54
+dim(testingdf)
+## [1] 20 53
+Partition the data set into training and testing data from trainingdf
+inTrain <- createDataPartition(y = trainingdf$classe, p=.95, list = FALSE)
+training <- trainingdf[inTrain, ]
+testing <- trainingdf[-inTrain, ]
+Training the model
+Training the model using Random Forest
+rfModel <- randomForest(classe~., data=training)
+# Summary of the model
+rfModel
+## 
+## Call:
+##  randomForest(formula = classe ~ ., data = training) 
+##                Type of random forest: classification
+##                      Number of trees: 500
+## No. of variables tried at each split: 7
+## 
+##         OOB estimate of  error rate: 0.17%
+## Confusion matrix:
+##      A    B    C    D    E  class.error
+## A 5300    0    0    0    1 0.0001886437
+## B    2 3605    1    0    0 0.0008314856
+## C    0    7 3244    0    0 0.0021531836
+## D    0    0   13 3042    1 0.0045811518
+## E    0    0    0    6 3421 0.0017508025
+# confusion matrics
+rfPredictionsTesting <- predict(rfModel, newdata = testing, class = "class")
+rfCMatrix <- confusionMatrix(rfPredictionsTesting, testing$classe)
+rfCMatrix
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction   A   B   C   D   E
+##          A 279   0   0   0   0
+##          B   0 188   0   0   0
+##          C   0   1 171   0   0
+##          D   0   0   0 160   0
+##          E   0   0   0   0 180
+## 
+## Overall Statistics
+##                                      
+##                Accuracy : 0.999      
+##                  95% CI : (0.9943, 1)
+##     No Information Rate : 0.285      
+##     P-Value [Acc > NIR] : < 2.2e-16  
+##                                      
+##                   Kappa : 0.9987     
+##  Mcnemar's Test P-Value : NA         
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity             1.000   0.9947   1.0000   1.0000   1.0000
+## Specificity             1.000   1.0000   0.9988   1.0000   1.0000
+## Pos Pred Value          1.000   1.0000   0.9942   1.0000   1.0000
+## Neg Pred Value          1.000   0.9987   1.0000   1.0000   1.0000
+## Prevalence              0.285   0.1931   0.1747   0.1634   0.1839
+## Detection Rate          0.285   0.1920   0.1747   0.1634   0.1839
+## Detection Prevalence    0.285   0.1920   0.1757   0.1634   0.1839
+## Balanced Accuracy       1.000   0.9974   0.9994   1.0000   1.0000
+#plot the model
+plot(rfModel)
+
+
+# Plot the variable importance
+varImpPlot(rfModel)
+
+
+# Confusion matrix with testing
+preductionOnTesting <- predict(rfModel, newdata=testing)
+confusionMatrix(preductionOnTesting, testing$classe)
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction   A   B   C   D   E
+##          A 279   0   0   0   0
+##          B   0 188   0   0   0
+##          C   0   1 171   0   0
+##          D   0   0   0 160   0
+##          E   0   0   0   0 180
+## 
+## Overall Statistics
+##                                      
+##                Accuracy : 0.999      
+##                  95% CI : (0.9943, 1)
+##     No Information Rate : 0.285      
+##     P-Value [Acc > NIR] : < 2.2e-16  
+##                                      
+##                   Kappa : 0.9987     
+##  Mcnemar's Test P-Value : NA         
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity             1.000   0.9947   1.0000   1.0000   1.0000
+## Specificity             1.000   1.0000   0.9988   1.0000   1.0000
+## Pos Pred Value          1.000   1.0000   0.9942   1.0000   1.0000
+## Neg Pred Value          1.000   0.9987   1.0000   1.0000   1.0000
+## Prevalence              0.285   0.1931   0.1747   0.1634   0.1839
+## Detection Rate          0.285   0.1920   0.1747   0.1634   0.1839
+## Detection Prevalence    0.285   0.1920   0.1757   0.1634   0.1839
+## Balanced Accuracy       1.000   0.9974   0.9994   1.0000   1.0000
+plot(rfCMatrix$table, col = rfCMatrix$byClass, main = paste("Random Forest Confusion Matrix: Accuracy =", round(rfCMatrix$overall['Accuracy'], 4)))
+
+
+Training the model with Decision Trees
+set.seed(33323)
+decisionTreeModel <- rpart(classe ~ ., data=training, method="class")
+library(rpart.plot)
+# Normal plot
+rpart.plot(decisionTreeModel)
+
+
+# fancy Plot 
+fancyRpartPlot(decisionTreeModel)
+
+
+# predicitons
+predictionsDecisionTree <- predict(decisionTreeModel, testing, type = "class")
+# Confusion matrix
+cmtree <- confusionMatrix(predictionsDecisionTree, testing$classe)
+cmtree
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction   A   B   C   D   E
+##          A 240  27   8  10  10
+##          B   9 118  11   9  17
+##          C   6  11 133  21  14
+##          D  21  26  14 117  18
+##          E   3   7   5   3 121
+## 
+## Overall Statistics
+##                                           
+##                Accuracy : 0.7446          
+##                  95% CI : (0.7161, 0.7717)
+##     No Information Rate : 0.285           
+##     P-Value [Acc > NIR] : < 2.2e-16       
+##                                           
+##                   Kappa : 0.6767          
+##  Mcnemar's Test P-Value : 1.586e-06       
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            0.8602   0.6243   0.7778   0.7312   0.6722
+## Specificity            0.9214   0.9418   0.9356   0.9035   0.9775
+## Pos Pred Value         0.8136   0.7195   0.7189   0.5969   0.8705
+## Neg Pred Value         0.9430   0.9129   0.9521   0.9451   0.9298
+## Prevalence             0.2850   0.1931   0.1747   0.1634   0.1839
+## Detection Rate         0.2451   0.1205   0.1359   0.1195   0.1236
+## Detection Prevalence   0.3013   0.1675   0.1890   0.2002   0.1420
+## Balanced Accuracy      0.8908   0.7831   0.8567   0.8174   0.8248
+# Accuracy plot
+plot(cmtree$table, col = cmtree$byClass, main = paste("Decision Tree Confusion Matrix: Accuracy =", round(cmtree$overall['Accuracy'], 4)))
+
+
+Trainig the model using SVM
+svmModel = svm(classe ~. , data=training)
+#prediction
+svmPredictions <- predict(svmModel, newdata= testing)
+# Confusion matrix
+cmSVM <- confusionMatrix(svmPredictions, testing$classe)
+cmSVM
+## Confusion Matrix and Statistics
+## 
+##           Reference
+## Prediction   A   B   C   D   E
+##          A 279  14   1   0   0
+##          B   0 169   4   0   0
+##          C   0   5 164  14   1
+##          D   0   1   2 146   3
+##          E   0   0   0   0 176
+## 
+## Overall Statistics
+##                                          
+##                Accuracy : 0.954          
+##                  95% CI : (0.939, 0.9663)
+##     No Information Rate : 0.285          
+##     P-Value [Acc > NIR] : < 2.2e-16      
+##                                          
+##                   Kappa : 0.9417         
+##  Mcnemar's Test P-Value : NA             
+## 
+## Statistics by Class:
+## 
+##                      Class: A Class: B Class: C Class: D Class: E
+## Sensitivity            1.0000   0.8942   0.9591   0.9125   0.9778
+## Specificity            0.9786   0.9949   0.9752   0.9927   1.0000
+## Pos Pred Value         0.9490   0.9769   0.8913   0.9605   1.0000
+## Neg Pred Value         1.0000   0.9752   0.9912   0.9831   0.9950
+## Prevalence             0.2850   0.1931   0.1747   0.1634   0.1839
+## Detection Rate         0.2850   0.1726   0.1675   0.1491   0.1798
+## Detection Prevalence   0.3003   0.1767   0.1879   0.1553   0.1798
+## Balanced Accuracy      0.9893   0.9446   0.9672   0.9526   0.9889
+#plot
+plot(cmSVM$table, col = cmSVM$byClass, main = paste("SVM Confusion Matrix: Accuracy =", round(cmSVM$overall['Accuracy'], 4)))
+
+
+Predicting Results on the Test Data
+# Using Random Forest
+rfPredictions <- predict(rfModel, newdata = testingdf)
+rfPredictions
+##  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+##  B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  E 
+## Levels: A B C D E
+# Using Decision tree
+decisionTreePredictions <- predict(decisionTreeModel, newdata = testingdf, type= "class")
+decisionTreePredictions
+##  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+##  E  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  B
+## Levels: A B C D E
+# Using SVM
+dim(testingdf)
+## [1] 20 53
+dim(testing)
+## [1] 979  54
+svmPredictions <- predict(svmModel, newdata = testingdf)
+svmPredictions
+##  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 
+##  B  A  B  A  A  E  D  B  A  A  B  C  B  A  E  E  A  B  B  B 
+## Levels: A B C D E
